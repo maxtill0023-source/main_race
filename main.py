@@ -88,7 +88,7 @@ def initialize_firebase():
     except Exception as e:
         # 인증 정보 형식 오류 (예: private_key 줄바꿈 오류) 포함 모든 초기화 오류 처리
         st.error(f"❌ Firebase 인증 정보 오류로 연결 실패: {e}")
-        st.error("💡 'secrets.toml' 파일의 [firebase] 섹션 내용을 다시 확인해주세요.")
+        st.error("💡 'secrets.toml' 파일의 내용을 다시 확인해주세요.")
         return None 
 
 # Firebase 초기화 시도. 오류가 나더라도 None을 반환하여 앱 실행은 막지 않습니다.
@@ -122,16 +122,15 @@ def mandatory_pre_analysis_learning(db_client):
         return []
 
     try:
-        # 🚨 수정: 'protocols' 컬렉션에서 'active'가 True인 전략만 불러옵니다.
-        # 사용자가 입력한 10개의 전략 문서를 불러오기 위함입니다.
-        # 만약 컬렉션 이름을 'protocols' 대신 'notes' 등으로 사용하셨다면 이 부분을 수정해야 합니다.
-        protocols_ref = db_client.collection('protocols').where('active', '==', True).stream()
+        # 🟢 수정된 부분: 컬렉션 이름을 'notes'로 지정합니다.
+        # 'active' 필드가 True인 문서만 불러와 활성화된 전략으로 간주합니다.
+        notes_ref = db_client.collection('notes').where('active', '==', True).stream()
         
         active_strategies_data = []
-        # 각 전략 문서의 'title'을 전략 ID로 사용한다고 가정하고 데이터 로드
-        for i, doc in enumerate(protocols_ref):
+        # 각 전략 문서에 순서대로 ID 부여 (실제 DB에 'strategy_id' 필드가 있다면 그것을 사용)
+        for i, doc in enumerate(notes_ref):
             data = doc.to_dict()
-            # 임시로 'PROTOCOL_1'부터 'PROTOCOL_10'까지 ID 부여 (10개 전략을 가정)
+            # 임시로 'PROTOCOL_1'부터 'PROTOCOL_N'까지 ID 부여
             data['strategy_id'] = f"PROTOCOL_{i+1}" 
             active_strategies_data.append(data)
 
@@ -140,24 +139,21 @@ def mandatory_pre_analysis_learning(db_client):
         st.session_state['active_strategy_data'] = active_strategies_data
         st.session_state['active_strategy_count'] = count
         
-        # 메시지 수정: 로드된 실제 전략 개수를 표시합니다.
+        # 로드된 실제 전략 개수를 표시합니다.
         st.info(f"🧠 Firebase 학습 완료: 총 {count}개의 활성화된 전략 규칙이 DTP 엔진에 로드되었습니다.")
         
         # DTP 로직이 사용할 수 있도록 '전략 ID' 리스트를 반환
         return [s['strategy_id'] for s in active_strategies_data]
     
     except Exception as e:
-        # Firestore 컬렉션 이름 오류 등으로 인해 전략 로드에 실패하면 0개로 설정
-        st.error(f"❌ 전략 로드 중 오류 발생: {e}")
+        # 컬렉션 이름 오류 등으로 인해 전략 로드에 실패하면 0개로 설정
+        st.error(f"❌ 전략 로드 중 오류 발생 (컬렉션 'notes' 확인 필요): {e}")
         st.session_state['active_strategy_count'] = 0
         return []
 
-# 🚨 제거: analyze_report_with_gemini 함수는 사용자의 요청으로 완전히 제거되었습니다.
-# Gemini API 키 오류를 방지하고, 경기 후 리포트 분석 대신 사전 분석에 집중합니다.
 
 # --- 3. 핵심 분석 프로토콜 (DTP & Kelly Criterion) ---
 
-# 🚨 함수 시그니처 변경: gemini_analysis 제거, track_condition 추가
 def apply_dtp_protocol(df_horse, track_condition, active_strategies): 
     """Firebase 학습 전략 및 주로 상태를 반영한 DTP 프로토콜."""
     dtp_results = []
@@ -165,13 +161,19 @@ def apply_dtp_protocol(df_horse, track_condition, active_strategies):
     # 주로 상태에 따른 기본 리스크 설정 (VMC, ICR 프로토콜 일부 반영)
     base_risk = 0
     track_condition_note = ""
+    
+    # 🚨 VMC(Variable Metric Calibration) 프로토콜 반영
     if track_condition == "습함":
         base_risk = 1
         track_condition_note = "습한 주로에서는 마필별 적응도에 따라 1점의 기본 리스크가 부여됩니다."
     elif track_condition == "불량":
         base_risk = 2
         track_condition_note = "불량 주로에서는 예상치 못한 변수로 인해 2점의 높은 기본 리스크가 부여됩니다."
-    else: # 양호, 다소 습함, 건조
+    elif track_condition == "건조":
+        # 건조 주로의 경우, 오히려 인기도가 높은 마필에 대한 과신 리스크 0.5점 부여 (DTP 1번 로직)
+        base_risk = 0 
+        track_condition_note = "건조 주로 상태는 기본 리스크가 없지만, DTP 프로토콜에 따라 인기도 마필의 과신 리스크가 적용됩니다."
+    else: # 양호, 다소 습함
         base_risk = 0
         track_condition_note = f"{track_condition} 주로 상태는 기본 리스크가 없습니다."
 
@@ -192,7 +194,7 @@ def apply_dtp_protocol(df_horse, track_condition, active_strategies):
                 analysis_note.append(f"🐴 **정적 리스크:** 짝수 마번 {horse['마번']} 리스크 1점 추가.")
                 
             # 2. 학습된 전략 리스크 (사용자 입력 프로토콜 반영)
-            # 여기서는 사용자님이 입력한 10개의 프로토콜 중 일부를 가상의 ID로 적용합니다.
+            # 'notes' 컬렉션에서 로드된 실제 프로토콜 ID(PROTOCOL_1, PROTOCOL_2...)가 적용된다고 가정합니다.
             
             # (PIR: 부상 복귀/잠재력 제한 전략 - Protocol 5)
             if "PROTOCOL_5" in active_strategies and horse['무게(kg)'] >= 57.0: 
@@ -268,7 +270,7 @@ def main():
         
         st.markdown("---")
 
-        # 🚨 신규 추가: 주로 상태 선택 (사용자 요청 반영)
+        # 주로 상태 선택 (사용자 요청 반영)
         track_condition = st.radio(
             "주로 상태 선택 (VMC 프로토콜 반영)", 
             ["양호", "다소 습함", "습함", "불량", "건조"], 
@@ -279,9 +281,6 @@ def main():
 
 
         race_card_text = st.text_area("📝 출전표 정보를 여기에 붙여넣으세요.", height=150, placeholder="1.선진발(김철수) 57.0 ...")
-        
-        # 🚨 제거: 심판/조교 리포트 텍스트 입력창 제거 (사용자 요청 반영)
-        # qualitative_report_text = st.text_area("📝 심판/조교 리포트 텍스트를 여기에 붙여넣으세요.", height=150, placeholder="Gemini AI가 분석할 리포트 원문...")
         
         # db가 연결되지 않았다면, 학습 버튼은 비활성화됩니다.
         run_analysis = st.button("🚀 분석 실행", use_container_width=True, disabled=(not race_card_text))
@@ -294,11 +293,7 @@ def main():
             else:
                 st.info("💡 Firebase 연결 실패로 학습 전략은 적용되지 않습니다.")
             
-            # 2. Gemini 분석 실행 (제거됨)
-            # gemini_analysis = analyze_report_with_gemini(qualitative_report_text)
-            gemini_analysis = {'tags': [], 'summary': '질적 분석은 현재 비활성화되었습니다.'} # 더미 데이터
-
-            # 3. 데이터 파싱 (임시 데이터 사용 - 실제로는 race_card_text를 파싱해야 함)
+            # 2. 데이터 파싱 (임시 데이터 사용 - 실제로는 race_card_text를 파싱해야 함)
             data = {
                 '마번': [1, 2, 3, 4],
                 '마명': ['선진발', '경종한리', '가온천희', '인마속도'],
@@ -307,9 +302,8 @@ def main():
             }
             df_race_card = pd.DataFrame(data)
 
-            # 4. 최종 DTP 및 켈리 계산
+            # 3. 최종 DTP 및 켈리 계산
             with st.spinner('🚨 DTP (레드 팀 분석) 프로토콜 적용 중...'):
-                # 🚨 함수 호출 변경: track_condition을 넘기고 gemini_analysis 제거
                 df_dtp_result = apply_dtp_protocol(df_race_card, track_condition, active_strategies)
                 복승_allocation, 삼복승_allocation = calculate_kelly_allocation(df_dtp_result)
 
@@ -367,7 +361,8 @@ def main():
                     st.error("전략 연구소 비활성화: Firebase 연결이 필요합니다.")
                 else:
                     strategy_count = st.session_state.get('active_strategy_count', 0)
-                    st.info(f"현재 Firebase 'protocols' 컬렉션에 저장된 {strategy_count}개의 학습 전략이 DTP 엔진에 활성화되었습니다. (추후 심층 분석 기능 추가 예정)")
+                    # 메시지 수정: 컬렉션 이름을 'notes'로 명시합니다.
+                    st.info(f"현재 Firebase 'notes' 컬렉션에 저장된 {strategy_count}개의 학습 전략이 DTP 엔진에 활성화되었습니다. (추후 심층 분석 기능 추가 예정)")
         else:
             with col_main:
                 st.info("👆 분석을 시작하려면 왼쪽 컨트롤 패널에 정보를 입력하고 [분석 실행] 버튼을 눌러주세요.")
