@@ -167,16 +167,16 @@ def parse_race_card_text(text):
     if not text:
         return pd.DataFrame()
         
-    # [수정된 정규 표현식]
-    # 1. 마번: (\d+)
-    # 2. 마명: \s*([^(]+?)\s* - 마번 뒤 공백 허용, 괄호가 나오기 전까지 비탐욕적으로 캡처
-    # 3. 기수: \( *(.+?) *\) - 괄호 내부 및 주변의 모든 공백 허용
-    # 4. 무게: \s*([\d\.]+) - 기수 뒤 공백 허용, 무게 캡처
-    pattern = re.compile(r'(\d+)\.\s*([^(]+?)\s*\((.+?)\)\s*([\d\.]+)', re.MULTILINE)
-    
-    # 텍스트에서 특수 문자나 불필요한 공백을 미리 제거하여 정규 표현식의 성공률을 높입니다.
-    # 전각 공백 및 기타 유니코드 공백을 일반 공백으로 치환
+    # ⭐⭐⭐ [강화된 전처리] ⭐⭐⭐
+    # 1. 전각 공백 및 기타 유니코드 공백을 일반 공백으로 치환
     text = re.sub(r'[\u2000-\u200A\u3000]', ' ', text)
+    
+    # [정규 표현식]
+    # 1. 마번: (\d+)
+    # 2. 마명: \s*([^(]+?)\s* - 괄호 전까지의 모든 문자(비탐욕적)
+    # 3. 기수: \( *(.+?) *\) - 괄호 내부 및 주변의 공백 허용
+    # 4. 무게: \s*([\d\.]+) - 무게 캡처
+    pattern = re.compile(r'(\d+)\.\s*([^(]+?)\s*\((.+?)\)\s*([\d\.]+)', re.MULTILINE)
     
     matches = pattern.findall(text)
     
@@ -189,10 +189,18 @@ def parse_race_card_text(text):
     
     for match in matches:
         parsed_data['마번'].append(int(match[0]))
-        # 파싱된 마명과 기수에서 불필요한 공백을 확실히 제거합니다.
+        # ⭐⭐⭐ [강화] 마명과 기수에서 불필요한 공백을 확실히 제거합니다.
         parsed_data['마명'].append(match[1].strip()) 
         parsed_data['기수'].append(match[2].strip())
-        parsed_data['무게(kg)'].append(float(match[3]))
+        
+        # 무게(kg) 파싱 시, 데이터 오류 방지를 위해 float 변환에 실패하면 0.0으로 처리
+        try:
+            weight = float(match[3])
+        except ValueError:
+            st.warning(f"⚠️ 마번 {match[0]}의 부담 중량 파싱 오류: '{match[3]}' 대신 0.0kg 적용.")
+            weight = 0.0
+            
+        parsed_data['무게(kg)'].append(weight)
 
     return pd.DataFrame(parsed_data)
 
@@ -304,11 +312,16 @@ def calculate_kelly_allocation(df_analysis):
     복승_allocation = []
     삼복승_allocation = []
     
-    # 마명 가져오는 유틸리티 함수
+    # ⭐⭐⭐ [수정] 마번과 마명만 깔끔하게 가져오는 유틸리티 함수 ⭐⭐⭐
     def get_horse_info(horse_numbers):
-        """마번 리스트를 받아 '마번(마명)' 형태로 변환합니다."""
-        info = [f"{n}({top_dict.get(n, '정보없음')})" for n in horse_numbers]
+        """마번 리스트를 받아 '마번(마명)' 형태로 변환합니다. 마명은 top_dict에서 가져옵니다."""
+        info = []
+        for n in horse_numbers:
+            # top_dict에서 마명을 가져오고, 없으면 '마명오류' 표시
+            ma_myeong = top_dict.get(n, '마명오류') 
+            info.append(f"{n}({ma_myeong})")
         return " - ".join(info)
+
 
     # --- 복승식 분배 (100%) ---
     if num_candidates >= 4:
