@@ -2,9 +2,8 @@ import streamlit as st
 import pandas as pd
 import json
 import re
-# google-genai 라이브러리가 이제 질적 분석에 사용되지 않으므로 주석 처리합니다.
-# from google import genai 
-# firebase-admin 라이브러리가 필요합니다.
+from io import BytesIO # PDF 파일 처리를 위해 추가
+import PyPDF2 
 import firebase_admin
 from firebase_admin import credentials, firestore
 
@@ -80,7 +79,7 @@ def initialize_firebase():
         cred = credentials.Certificate(key_dict)
         
         if not firebase_admin._apps:
-            firebase_admin.initialize_app(cred, name="ai_database") 
+             firebase_admin.initialize_app(cred, name="ai_database") 
         
         st.success("🎉 Firebase 데이터베이스 연결 성공! 복기 및 학습 기능이 활성화되었습니다.")
         return firestore.client(app=firebase_admin.get_app(name="ai_database"))
@@ -142,6 +141,22 @@ def mandatory_pre_analysis_learning(db_client):
         st.error(f"❌ 전략 로드 중 오류 발생 (컬렉션 'notes' 확인 필요): {e}")
         st.session_state['active_strategy_count'] = 0
         return []
+
+# --- PDF 텍스트 추출 유틸리티 함수 추가 ---
+def extract_text_from_pdf(uploaded_file):
+    """PyPDF2를 사용하여 업로드된 PDF 파일에서 텍스트를 추출합니다."""
+    text = ""
+    try:
+        # BytesIO 객체를 직접 사용
+        reader = PyPDF2.PdfReader(uploaded_file) 
+        for page in reader.pages:
+            text += page.extract_text() or "" # extract_text가 None을 반환할 경우 대비
+    except Exception as e:
+        st.error(f"❌ PDF 텍스트 추출 오류: {e}")
+        st.warning("💡 PDF 파일에 텍스트 레이어가 포함되어 있는지 확인하거나, 텍스트를 직접 복사하여 붙여넣어 주세요.")
+        return ""
+    return text
+
 
 # 🟢 파싱 함수: 정규 표현식 유연성 확보 및 공백 처리 강화
 def parse_race_card_text(text):
@@ -268,50 +283,89 @@ def apply_dtp_protocol(df_horse, track_condition, active_strategies):
 
     return pd.DataFrame(dtp_results)
 
+
 def calculate_kelly_allocation(df_analysis):
-    """켈리 기준 변형 로직을 사용하여 복승식/삼복승식 비중 100% 분배 (시뮬레이션)."""
-    # 리스크 점수가 낮을수록 AI_Score가 높음
+    """
+    DTP 점수 기반 Top 3 마필 선정 시, 삼복승 분배 로직을 강화하여 
+    4순위 마필을 방어 조합에 포함하여 최소 4마리까지 활용하도록 개선합니다.
+    """
+    # 1. AI_Score 계산 (리스크 점수가 낮을수록 Score가 높음)
     df_analysis['AI_Score'] = 100 - (df_analysis['DTP 리스크 점수'] * 10)
     
-    # 켈리 분배는 최소 2마리 이상일 때 의미가 있으므로, 최소한의 검증은 필요함.
-    # 상위 3마리 마번만 가져옵니다.
-    # AI_Score가 동일할 경우 마번 순서로 정렬됩니다.
-    top_3 = df_analysis.sort_values(by=['AI_Score', '마번'], ascending=[False, True]).head(3)['마번'].tolist()
-
+    # 2. Top 4 마필 선정 (축마, 후착, 복병 후보)
+    top_horses = df_analysis.sort_values(by=['AI_Score', '마번'], ascending=[False, True]).head(4)
+    top_n = top_horses['마번'].tolist() # 최대 4마리
+    
+    num_candidates = len(top_n)
+    
     복승_allocation = []
     삼복승_allocation = []
     
-    num_candidates = len(top_3)
-    
-    # --- 복승식 분배 ---
-    if num_candidates >= 3:
-        # 3마리 이상: 핵심(1-2), 방어(1-3), 부축(2-3)
+    # --- 복승식 분배 (100%) ---
+    if num_candidates >= 4:
+        # 4마리 조합 (1-2, 1-3, 2-3, 1-4, 2-4)
+        n1, n2, n3, n4 = top_n[0], top_n[1], top_n[2], top_n[3]
         복승_allocation = [
-            {'name': f"{top_3[0]} - {top_3[1]} 조합 (핵심)", 'percentage': 55.0},
-            {'name': f"{top_3[0]} - {top_3[2]} 조합 (방어)", 'percentage': 30.0},
-            {'name': f"{top_3[1]} - {top_3[2]} 조합 (부축)", 'percentage': 15.0}
+            {'name': f"{n1} - {n2} 조합 (핵심)", 'percentage': 40.0},
+            {'name': f"{n1} - {n3} 조합 (방어)", 'percentage': 25.0},
+            {'name': f"{n2} - {n3} 조합 (부축)", 'percentage': 15.0},
+            {'name': f"{n1} - {n4} 조합 (복병)", 'percentage': 10.0},
+            {'name': f"{n2} - {n4} 조합 (복병)", 'percentage': 10.0}
         ]
-    elif num_candidates == 2:
-        # 2마리: 핵심(1-2)에 100% 집중
+    elif num_candidates == 3:
+        # 3마리 조합 (1-2, 1-3, 2-3)
+        n1, n2, n3 = top_n[0], top_n[1], top_n[2]
         복승_allocation = [
-            {'name': f"{top_3[0]} - {top_3[1]} 조합 (핵심)", 'percentage': 100.0}
+            {'name': f"{n1} - {n2} 조합 (핵심)", 'percentage': 50.0},
+            {'name': f"{n1} - {n3} 조합 (방어)", 'percentage': 30.0},
+            {'name': f"{n2} - {n3} 조합 (부축)", 'percentage': 20.0}
         ]
+    # (2마리 이하 로직 생략)
     else:
-        # 0 또는 1마리
         복승_allocation = [{'name': '분석 불가 (유력 후보 부족)', 'percentage': 100.0}]
 
-    # --- 삼복승식 분배 ---
+
+    # --- 삼복승식 분배 (강화된 로직) ---
     if num_candidates >= 3:
-        # 3마리 이상: BOX(1-2-3) 및 방어
-        삼복승_allocation = [
-            {'name': f"BOX ({top_3[0]} - {top_3[1]} - {top_3[2]}) (핵심)", 'percentage': 70.0},
-            {'name': f"{top_3[0]} - {top_3[1]} - 복병 (방어)", 'percentage': 30.0}
-        ]
+        n1, n2, n3 = top_n[0], top_n[1], top_n[2]
+        base_box_name = f"BOX ({n1} - {n2} - {n3})"
+        
+        if num_candidates >= 4:
+            # 4마리가 확보되었을 경우
+            n4 = top_n[3]
+            삼복승_allocation = [
+                {'name': f"{base_box_name} (핵심)", 'percentage': 70.0},
+                {'name': f"BOX ({n1} - {n2} - {n4}) (방어)", 'percentage': 30.0}
+            ]
+        elif num_candidates == 3:
+            # [삼복승 로직 강화] Top 3 외에서 가장 리스크 점수가 낮은 마필을 4순위(복병)로 강제 투입
+            all_other_horses = df_analysis[~df_analysis['마번'].isin(top_n)]
+            
+            if not all_other_horses.empty:
+                # Top 3 외에서 가장 리스크 점수가 낮은 마필을 4순위(복병)로 간주
+                n4_horse = all_other_horses.sort_values(
+                    by=['AI_Score', '마번'], 
+                    ascending=[False, True]
+                ).iloc[0]
+                n4 = n4_horse['마번']
+                n4_name = n4_horse['마명']
+                
+                # Top 3 BOX에 60%, 4순위 복병 포함 방어 BOX에 40% 분배 (총 4마리 활용)
+                삼복승_allocation = [
+                    {'name': f"{base_box_name} (핵심)", 'percentage': 60.0},
+                    {'name': f"BOX ({n1} - {n2} - {n4}) (방어: 복병 {n4_name})", 'percentage': 40.0}
+                ]
+            else:
+                # 3마리만 출전했거나, 파싱된 마필이 3마리뿐인 경우 (어쩔 수 없이 100% 집중)
+                삼복승_allocation = [
+                    {'name': f"{base_box_name} (핵심)", 'percentage': 100.0}
+                ]
     else:
         # 2마리 이하
         삼복승_allocation = [{'name': '분석 불가 (유력 후보 부족)', 'percentage': 100.0}]
         
     return 복승_allocation, 삼복승_allocation
+
 
 # --- 4. 메인 Streamlit 함수 ---
 
@@ -323,6 +377,7 @@ def main():
     with col_control:
         st.subheader("경주 입력 및 설정")
         selected_region = st.selectbox("지역 선택", ["서울", "부산", "제주"])
+        # 현재 날짜로 기본값 설정 (2025년 11월 21일)
         st.date_input("경주 날짜", pd.to_datetime('2025-11-21')) 
         st.number_input("경주 번호 (필수)", min_value=1, value=1, step=1) 
         
@@ -333,40 +388,47 @@ def main():
             "주로 상태 선택 (VMC 프로토콜 반영)", 
             ["양호", "다소 습함", "습함", "불량", "건조"], 
             horizontal=True,
-            index=3 # Default to 불량 based on user's image
+            index=3
         )
         st.markdown("---")
 
-        # 🌟 [수정된 부분] 출전표 입력: 파일 업로드 기능 추가
-        st.subheader("📝 출전표 데이터 입력 (파일 업로드 지원)")
+        # 🌟 출전표 입력: PDF/TXT 업로드 및 텍스트 영역 결합
+        st.subheader("📝 출전표 데이터 입력 (PDF/TXT 지원)")
         
-        # Streamlit 파일 업로더
+        # Streamlit 파일 업로더: PDF 및 TXT 지원
         uploaded_file = st.file_uploader(
-            "출전표 PDF/텍스트 파일 업로드 (PDF는 텍스트 레이어 포함 시 가능)",
-            type=['txt', 'csv', 'pdf'], # pdf 형식 추가
+            "출전표 PDF/텍스트 파일 업로드 (텍스트 레이어 포함된 PDF 추천)",
+            type=['txt', 'pdf'], 
             accept_multiple_files=False
         )
         
         race_card_text = ""
         
         if uploaded_file is not None:
-            try:
-                # 파일을 UTF-8로 디코딩하여 텍스트를 읽습니다.
-                race_card_text = uploaded_file.read().decode("utf-8")
-                st.info(f"✅ 파일 '{uploaded_file.name}'에서 텍스트 {len(race_card_text)}자 로드 완료.")
-            except Exception as e:
-                # PDF/TXT 파일이 읽히지 않을 경우 에러 메시지 출력
-                st.error(f"❌ 파일 읽기 오류! PDF의 경우 텍스트 레이어가 포함된 파일인지 확인하거나, 텍스트를 추출하여 직접 붙여넣어 주세요. 상세 오류: {e}")
-                race_card_text = ""
+            with st.spinner(f"✅ 파일 '{uploaded_file.name}'에서 텍스트 추출 중..."):
+                if uploaded_file.type == "application/pdf":
+                    # BytesIO를 사용하여 파일 객체를 PyPDF2에 전달
+                    race_card_text = extract_text_from_pdf(BytesIO(uploaded_file.read()))
+                else: # txt 파일 (text/plain)
+                    try:
+                        # 파일을 UTF-8로 디코딩하여 텍스트를 읽습니다.
+                        race_card_text = uploaded_file.read().decode("utf-8")
+                    except Exception as e:
+                        st.error(f"❌ 텍스트 파일 읽기 오류: {e}")
+                        race_card_text = ""
+                
+                if race_card_text:
+                    st.info(f"✅ 텍스트 {len(race_card_text)}자 로드 완료.")
+                else:
+                    st.warning("⚠️ 파일에서 유효한 텍스트를 추출하지 못했습니다.")
         
         # 파일 업로드 내용이 없거나, 파일이 없으면 수동 입력 텍스트 영역을 보여줌
         if not race_card_text:
-            default_text = "1.금빛찬양(안득수) 54.0\n2.민강불패(문현진) 55.0\n3.스마트(박재희) 55.0\n4.킹콩스텝(곽용남) 55.0\n5.일주향(김용섭) 55.0\n6.전꿈가도(강수한) 54.0\n7.센돌이(정명일) 55.0\n8.아라별(원유일) 54.0\n9.자유연대(한영민) 54.0\n10.마패창(임재광) 55.0"
             race_card_text = st.text_area(
                 "또는 여기에 출전표 텍스트를 직접 붙여넣으세요. (형식: 1.마명(기수) 57.0)", 
                 height=150, 
                 placeholder="1.선진발(김철수) 57.0\n2.경종한리(박지민) 54.5\n3.가온천희(이영희) 53.0\n4.인마속도(최민호) 55.0",
-                value=default_text
+                value="" # 기본값 제거
             )
 
         # 분석 실행 버튼은 텍스트 내용이 있어야 활성화
@@ -404,7 +466,7 @@ def main():
             # 🌟 [추가된 부분] 파싱 결과에 대한 경고/알림
             total_horses_in_df = len(df_race_card)
             if total_horses_in_df < 3:
-                 st.warning(f"⚠️ **주의:** {total_horses_in_df}마리만 유효하게 파싱되었습니다. 텍스트 형식을 다시 한번 확인해주세요.")
+                 st.warning(f"⚠️ **주의:** {total_horses_in_df}마리만 유효하게 파싱되었습니다. 최소 3마리 이상이 필요합니다.")
             else:
                  st.success(f"✅ 총 {total_horses_in_df}마리의 마필 정보가 성공적으로 파싱되어 분석에 사용되었습니다.")
 
@@ -419,11 +481,11 @@ def main():
             # --- [1. AI 예측] 탭 ---
             with tab_ai:
                 st.subheader("🐴 DTP 적용 결과 및 베팅 포트폴리오")
-                # 텍스트 파싱으로 생성된 실제 데이터를 보여줍니다.
                 st.dataframe(df_dtp_result, use_container_width=True)
                 
                 st.markdown("---")
                 st.header("💰 AI 추천 베팅 포트폴리오 (100% 분배)")
+                st.info("✅ DTP 리스크 점수가 가장 낮은 마필이 **축마/후보**로 선정되어 분배됩니다.")
                 bet_cols = st.columns(2)
                 
                 with bet_cols[0]: st.subheader("복승식"); 
