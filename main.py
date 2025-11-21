@@ -114,23 +114,18 @@ def save_review_data(review_data):
         st.error(f"❌ 데이터 저장 실패: {e}")
         return False
 
-# --- 2. 분석 전 의무 학습 (DTP 전략 로드) ---
-
 def mandatory_pre_analysis_learning(db_client):
     """분석 전 Firebase에서 사용자 정의 전략 노트를 불러와 DTP 엔진에 활성화."""
     if not db_client:
         return []
 
     try:
-        # 🟢 수정된 부분: 컬렉션 이름을 'notes'로 지정합니다.
-        # 'active' 필드가 True인 문서만 불러와 활성화된 전략으로 간주합니다.
+        # 컬렉션 이름을 'notes'로 지정합니다.
         notes_ref = db_client.collection('notes').where('active', '==', True).stream()
         
         active_strategies_data = []
-        # 각 전략 문서에 순서대로 ID 부여 (실제 DB에 'strategy_id' 필드가 있다면 그것을 사용)
         for i, doc in enumerate(notes_ref):
             data = doc.to_dict()
-            # 임시로 'PROTOCOL_1'부터 'PROTOCOL_N'까지 ID 부여
             data['strategy_id'] = f"PROTOCOL_{i+1}" 
             active_strategies_data.append(data)
 
@@ -139,17 +134,49 @@ def mandatory_pre_analysis_learning(db_client):
         st.session_state['active_strategy_data'] = active_strategies_data
         st.session_state['active_strategy_count'] = count
         
-        # 로드된 실제 전략 개수를 표시합니다.
         st.info(f"🧠 Firebase 학습 완료: 총 {count}개의 활성화된 전략 규칙이 DTP 엔진에 로드되었습니다.")
         
-        # DTP 로직이 사용할 수 있도록 '전략 ID' 리스트를 반환
         return [s['strategy_id'] for s in active_strategies_data]
     
     except Exception as e:
-        # 컬렉션 이름 오류 등으로 인해 전략 로드에 실패하면 0개로 설정
         st.error(f"❌ 전략 로드 중 오류 발생 (컬렉션 'notes' 확인 필요): {e}")
         st.session_state['active_strategy_count'] = 0
         return []
+
+# 🟢 새로 추가된 파싱 함수
+def parse_race_card_text(text):
+    """
+    텍스트 출전표를 DataFrame으로 변환합니다.
+    형식: 1.마명(기수) 57.0
+    """
+    if not text:
+        return pd.DataFrame()
+        
+    # 정규 표현식: (마번).\s*(마명)\s*(\(기수\))\s*(무게)
+    # \d+\.\s*(.+?)\s*\((.+?)\)\s*([\d\.]+)
+    # 마번: (\d+)
+    # 마명: (.+?) (비탐욕적으로 마번 다음부터 괄호 시작 전까지)
+    # 기수: (.+?) (괄호 안의 내용)
+    # 무게: ([\d\.]+) (숫자 및 소수점)
+    # 전체 패턴: 마번.마명(기수) 무게
+    pattern = re.compile(r'(\d+)\.\s*(.+?)\s*\((.+?)\)\s*([\d\.]+)', re.MULTILINE)
+    
+    matches = pattern.findall(text)
+    
+    parsed_data = {
+        '마번': [],
+        '마명': [],
+        '기수': [],
+        '무게(kg)': []
+    }
+    
+    for match in matches:
+        parsed_data['마번'].append(int(match[0]))
+        parsed_data['마명'].append(match[1].strip())
+        parsed_data['기수'].append(match[2].strip())
+        parsed_data['무게(kg)'].append(float(match[3]))
+
+    return pd.DataFrame(parsed_data)
 
 
 # --- 3. 핵심 분석 프로토콜 (DTP & Kelly Criterion) ---
@@ -270,7 +297,7 @@ def main():
         
         st.markdown("---")
 
-        # 주로 상태 선택 (사용자 요청 반영)
+        # 주로 상태 선택 (VMC 프로토콜 반영)
         track_condition = st.radio(
             "주로 상태 선택 (VMC 프로토콜 반영)", 
             ["양호", "다소 습함", "습함", "불량", "건조"], 
@@ -279,28 +306,35 @@ def main():
         )
         st.markdown("---")
 
-
-        race_card_text = st.text_area("📝 출전표 정보를 여기에 붙여넣으세요.", height=150, placeholder="1.선진발(김철수) 57.0 ...")
+        # 출전표 텍스트 입력 영역
+        race_card_text = st.text_area(
+            "📝 출전표 정보를 여기에 붙여넣으세요. (형식: 1.마명(기수) 57.0)", 
+            height=150, 
+            placeholder="1.선진발(김철수) 57.0\n2.경종한리(박지민) 54.5\n3.가온천희(이영희) 53.0\n4.인마속도(최민호) 55.0"
+        )
         
         # db가 연결되지 않았다면, 학습 버튼은 비활성화됩니다.
         run_analysis = st.button("🚀 분석 실행", use_container_width=True, disabled=(not race_card_text))
 
         if run_analysis:
-            # 1. 학습 데이터 로드 (DB 연결 성공 시에만 작동)
+            # 1. 학습 데이터 로드 
             active_strategies = []
             if db:
                 active_strategies = mandatory_pre_analysis_learning(db)
             else:
                 st.info("💡 Firebase 연결 실패로 학습 전략은 적용되지 않습니다.")
             
-            # 2. 데이터 파싱 (임시 데이터 사용 - 실제로는 race_card_text를 파싱해야 함)
-            data = {
-                '마번': [1, 2, 3, 4],
-                '마명': ['선진발', '경종한리', '가온천희', '인마속도'],
-                '기수': ['김철수', '박지민', '이영희', '최민호'],
-                '무게(kg)': [57.0, 54.5, 53.0, 55.0]
-            }
-            df_race_card = pd.DataFrame(data)
+            # 2. 🟢 수정된 부분: 텍스트 파싱 로직 적용
+            try:
+                df_race_card = parse_race_card_text(race_card_text)
+            except Exception as e:
+                # 파싱 오류 발생 시 사용자에게 경고하고 실행 중단
+                st.error(f"❌ 출전표 텍스트 파싱 오류! 형식(`1.마명(기수) 57.0`)을 확인해주세요. 상세 오류: {e}")
+                return 
+
+            if df_race_card.empty:
+                st.warning("⚠️ 출전표에서 유효한 마필 정보를 찾을 수 없습니다. 텍스트를 다시 확인해주세요.")
+                return 
 
             # 3. 최종 DTP 및 켈리 계산
             with st.spinner('🚨 DTP (레드 팀 분석) 프로토콜 적용 중...'):
@@ -321,6 +355,7 @@ def main():
             # --- [1. AI 예측] 탭 ---
             with tab_ai:
                 st.subheader("🐴 DTP 적용 결과 및 베팅 포트폴리오")
+                # 텍스트 파싱으로 생성된 실제 데이터를 보여줍니다.
                 st.dataframe(df_dtp_result, use_container_width=True)
                 
                 st.markdown("---")
@@ -361,7 +396,6 @@ def main():
                     st.error("전략 연구소 비활성화: Firebase 연결이 필요합니다.")
                 else:
                     strategy_count = st.session_state.get('active_strategy_count', 0)
-                    # 메시지 수정: 컬렉션 이름을 'notes'로 명시합니다.
                     st.info(f"현재 Firebase 'notes' 컬렉션에 저장된 {strategy_count}개의 학습 전략이 DTP 엔진에 활성화되었습니다. (추후 심층 분석 기능 추가 예정)")
         else:
             with col_main:
