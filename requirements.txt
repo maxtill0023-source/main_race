@@ -1,0 +1,4 @@
+streamlit>=1.0.0
+pandas
+google-genai # Gemini AI 모델 사용을 위해
+firebase-admin # Firebase 데이터베이스 사용을 위해
