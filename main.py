@@ -288,12 +288,15 @@ def calculate_kelly_allocation(df_analysis):
     """
     DTP 점수 기반 Top 3 마필 선정 시, 삼복승 분배 로직을 강화하여 
     4순위 마필을 방어 조합에 포함하여 최소 4마리까지 활용하도록 개선합니다.
+    (출력 결과에 마명 포함)
     """
     # 1. AI_Score 계산 (리스크 점수가 낮을수록 Score가 높음)
     df_analysis['AI_Score'] = 100 - (df_analysis['DTP 리스크 점수'] * 10)
     
     # 2. Top 4 마필 선정 (축마, 후착, 복병 후보)
     top_horses = df_analysis.sort_values(by=['AI_Score', '마번'], ascending=[False, True]).head(4)
+    # 딕셔너리로 변환하여 마번(key)으로 마명(value)을 쉽게 찾을 수 있도록 준비합니다.
+    top_dict = top_horses.set_index('마번')['마명'].to_dict()
     top_n = top_horses['마번'].tolist() # 최대 4마리
     
     num_candidates = len(top_n)
@@ -301,48 +304,50 @@ def calculate_kelly_allocation(df_analysis):
     복승_allocation = []
     삼복승_allocation = []
     
+    # 마명 가져오는 유틸리티 함수
+    def get_horse_info(horse_numbers):
+        """마번 리스트를 받아 '마번(마명)' 형태로 변환합니다."""
+        info = [f"{n}({top_dict.get(n, '정보없음')})" for n in horse_numbers]
+        return " - ".join(info)
+
     # --- 복승식 분배 (100%) ---
     if num_candidates >= 4:
-        # 4마리 조합 (1-2, 1-3, 2-3, 1-4, 2-4)
         n1, n2, n3, n4 = top_n[0], top_n[1], top_n[2], top_n[3]
         복승_allocation = [
-            {'name': f"{n1} - {n2} 조합 (핵심)", 'percentage': 40.0},
-            {'name': f"{n1} - {n3} 조합 (방어)", 'percentage': 25.0},
-            {'name': f"{n2} - {n3} 조합 (부축)", 'percentage': 15.0},
-            {'name': f"{n1} - {n4} 조합 (복병)", 'percentage': 10.0},
-            {'name': f"{n2} - {n4} 조합 (복병)", 'percentage': 10.0}
+            {'name': f"{get_horse_info([n1, n2])} (핵심)", 'percentage': 40.0},
+            {'name': f"{get_horse_info([n1, n3])} (방어)", 'percentage': 25.0},
+            {'name': f"{get_horse_info([n2, n3])} (부축)", 'percentage': 15.0},
+            {'name': f"{get_horse_info([n1, n4])} (복병)", 'percentage': 10.0},
+            {'name': f"{get_horse_info([n2, n4])} (복병)", 'percentage': 10.0}
         ]
     elif num_candidates == 3:
-        # 3마리 조합 (1-2, 1-3, 2-3)
         n1, n2, n3 = top_n[0], top_n[1], top_n[2]
         복승_allocation = [
-            {'name': f"{n1} - {n2} 조합 (핵심)", 'percentage': 50.0},
-            {'name': f"{n1} - {n3} 조합 (방어)", 'percentage': 30.0},
-            {'name': f"{n2} - {n3} 조합 (부축)", 'percentage': 20.0}
+            {'name': f"{get_horse_info([n1, n2])} (핵심)", 'percentage': 50.0},
+            {'name': f"{get_horse_info([n1, n3])} (방어)", 'percentage': 30.0},
+            {'name': f"{get_horse_info([n2, n3])} (부축)", 'percentage': 20.0}
         ]
     # (2마리 이하 로직 생략)
     else:
         복승_allocation = [{'name': '분석 불가 (유력 후보 부족)', 'percentage': 100.0}]
 
 
-    # --- 삼복승식 분배 (강화된 로직) ---
+    # --- 삼복승식 분배 (강화된 로직, 마명 포함) ---
     if num_candidates >= 3:
         n1, n2, n3 = top_n[0], top_n[1], top_n[2]
-        base_box_name = f"BOX ({n1} - {n2} - {n3})"
         
         if num_candidates >= 4:
-            # 4마리가 확보되었을 경우
             n4 = top_n[3]
+            base_box_info = get_horse_info([n1, n2, n3])
+            defense_box_info = get_horse_info([n1, n2, n4])
             삼복승_allocation = [
-                {'name': f"{base_box_name} (핵심)", 'percentage': 70.0},
-                {'name': f"BOX ({n1} - {n2} - {n4}) (방어)", 'percentage': 30.0}
+                {'name': f"BOX ({base_box_info}) (핵심)", 'percentage': 70.0},
+                {'name': f"BOX ({defense_box_info}) (방어)", 'percentage': 30.0}
             ]
         elif num_candidates == 3:
-            # [삼복승 로직 강화] Top 3 외에서 가장 리스크 점수가 낮은 마필을 4순위(복병)로 강제 투입
             all_other_horses = df_analysis[~df_analysis['마번'].isin(top_n)]
             
             if not all_other_horses.empty:
-                # Top 3 외에서 가장 리스크 점수가 낮은 마필을 4순위(복병)로 간주
                 n4_horse = all_other_horses.sort_values(
                     by=['AI_Score', '마번'], 
                     ascending=[False, True]
@@ -350,18 +355,20 @@ def calculate_kelly_allocation(df_analysis):
                 n4 = n4_horse['마번']
                 n4_name = n4_horse['마명']
                 
+                base_box_info = get_horse_info([n1, n2, n3])
+                defense_box_info = get_horse_info([n1, n2, n4])
+                
                 # Top 3 BOX에 60%, 4순위 복병 포함 방어 BOX에 40% 분배 (총 4마리 활용)
                 삼복승_allocation = [
-                    {'name': f"{base_box_name} (핵심)", 'percentage': 60.0},
-                    {'name': f"BOX ({n1} - {n2} - {n4}) (방어: 복병 {n4_name})", 'percentage': 40.0}
+                    {'name': f"BOX ({base_box_info}) (핵심)", 'percentage': 60.0},
+                    {'name': f"BOX ({defense_box_info}) (방어: 복병 {n4_name})", 'percentage': 40.0}
                 ]
             else:
-                # 3마리만 출전했거나, 파싱된 마필이 3마리뿐인 경우 (어쩔 수 없이 100% 집중)
+                base_box_info = get_horse_info([n1, n2, n3])
                 삼복승_allocation = [
-                    {'name': f"{base_box_name} (핵심)", 'percentage': 100.0}
+                    {'name': f"BOX ({base_box_info}) (핵심)", 'percentage': 100.0}
                 ]
     else:
-        # 2마리 이하
         삼복승_allocation = [{'name': '분석 불가 (유력 후보 부족)', 'percentage': 100.0}]
         
     return 복승_allocation, 삼복승_allocation
@@ -424,8 +431,9 @@ def main():
         
         # 파일 업로드 내용이 없거나, 파일이 없으면 수동 입력 텍스트 영역을 보여줌
         if not race_card_text:
+            # 📌 [수정된 부분] 파일 업로드 강력 추천 문구 추가
             race_card_text = st.text_area(
-                "또는 여기에 출전표 텍스트를 직접 붙여넣으세요. (형식: 1.마명(기수) 57.0)", 
+                "또는 여기에 출전표 텍스트를 직접 붙여넣으세요. (정확한 분석을 위해 PDF/TXT 파일 업로드 강력 추천)", 
                 height=150, 
                 placeholder="1.선진발(김철수) 57.0\n2.경종한리(박지민) 54.5\n3.가온천희(이영희) 53.0\n4.인마속도(최민호) 55.0",
                 value="" # 기본값 제거
@@ -485,7 +493,7 @@ def main():
                 
                 st.markdown("---")
                 st.header("💰 AI 추천 베팅 포트폴리오 (100% 분배)")
-                st.info("✅ DTP 리스크 점수가 가장 낮은 마필이 **축마/후보**로 선정되어 분배됩니다.")
+                st.info("✅ DTP 리스크 점수가 가장 낮은 마필이 **축마/후보**로 선정되었으며, 마명은 출전표에서 추출된 데이터입니다.")
                 bet_cols = st.columns(2)
                 
                 with bet_cols[0]: st.subheader("복승식"); 
