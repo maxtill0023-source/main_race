@@ -6,50 +6,59 @@ import PyPDF2
 
 # ----------------------
 # Streamlit Horse Analyzer - Complete
-# (uses local sample PDF: /mnt/data/j_run_hr_251121_01.pdf if chosen)
 # ----------------------
 
 st.set_page_config(page_title="가치 기반 경마 분석기 - Complete", layout="wide")
 st.title("가치 기반 경마 분석기 — 완전 자동화 버전 🐎")
 
 # ----------------------
-# PDF 텍스트 추출
+# PDF 텍스트 추출 (수정 완료: 파일 경로 및 PyPDF2 처리 안정화)
 # ----------------------
 
 def extract_text_from_pdf(file_like):
     """file_like: 파일 경로(str) 또는 파일 객체(BytesIO/UploadedFile) 지원"""
+    reader = None
     try:
         if isinstance(file_like, str):
-            f = open(file_like, 'rb')
-            reader = PyPDF2.PdfReader(f)
+            # 파일 경로인 경우, with 문을 사용하여 자동으로 파일을 닫습니다.
+            with open(file_like, 'rb') as f:
+                reader = PyPDF2.PdfReader(f)
         else:
+            # BytesIO 또는 UploadedFile인 경우
             reader = PyPDF2.PdfReader(file_like)
+    except FileNotFoundError:
+        st.error(f"PDF 파일을 찾을 수 없습니다: {file_like}")
+        return ""
     except Exception as e:
         st.error(f"PDF 열기 오류: {e}")
+        return ""
+
+    if reader is None:
         return ""
 
     text = ""
     try:
         for page in reader.pages:
+            # None 반환 시 빈 문자열로 안전하게 처리
             text += (page.extract_text() or "") + "\n"
     except Exception as e:
         st.error(f"PDF 텍스트 추출 중 오류: {e}")
         return ""
-    finally:
-        if isinstance(file_like, str):
-            f.close()
-    return text
+        
+    return text.strip()
 
 # ----------------------
-# 파싱: 무게 토큰 역추적 방식
+# 파싱: 무게 토큰 역추적 방식 (정규식 보완)
 # ----------------------
 
 def parse_race_pdf_text(text):
     if not text:
         return pd.DataFrame()
 
+    # 공백 정규화
     norm = re.sub(r"[ \t]+", " ", text)
-    weight_iter = list(re.finditer(r"([0-9]{2}\.[0-9])(?:\(|\s|\)|$)", norm))
+    # 무게 토큰 검색: 5x.x 형태 뒤에 공백, 괄호 등이 오는 경우를 포괄적으로 검색
+    weight_iter = list(re.finditer(r"([0-9]{2}\.[0-9])(?:[\s\)\(]|$)", norm))
 
     horses = []
     for w in weight_iter:
@@ -74,6 +83,7 @@ def parse_race_pdf_text(text):
         gender = ""
         color = ""
 
+        # 기수, 나이, 성별, 모색 정보를 찾는 정규식 (복잡하여 그대로 유지)
         jm = re.search(r"([가-힣]{2,4})\s*([0-9]{1,2})세\s*\(([0-9]{2}\.[0-9]{2}\.[0-9]{2})\)\s*(암|수)?\s*([가-힣]{1,3})?", tail)
         if jm:
             jockey = jm.group(1) or ""
@@ -135,11 +145,11 @@ def apply_dtp_protocol(df_horse, track_condition, active_strategies=None):
         risk_count = base_risk
         notes = []
         try:
-            weight = float(horse.get('무게(kg)', 0))
+            weight = float(horse.get('무게(kg)', 0) or 0)
         except Exception:
             weight = 0.0
         try:
-            num = int(horse.get('마번', 0))
+            num = int(horse.get('마번', 0) or 0)
         except Exception:
             num = 0
 
@@ -167,7 +177,13 @@ def calculate_kelly_allocation(df_analysis):
     if df_analysis is None or df_analysis.empty:
         return [{'name':'분석 불가','percentage':100.0}], [{'name':'분석 불가','percentage':100.0}]
     df = df_analysis.copy()
-    df['DTP 리스크 점수'] = df['DTP 리스크 점수'].astype(float)
+    
+    try:
+        df['DTP 리스크 점수'] = pd.to_numeric(df['DTP 리스크 점수'], errors='coerce')
+        df = df.dropna(subset=['DTP 리스크 점수'])
+    except:
+        return [{'name':'점수 계산 오류','percentage':100.0}], [{'name':'점수 계산 오류','percentage':100.0}]
+
     df['AI_Score'] = 100 - (df['DTP 리스크 점수'] * 10)
     top = df.sort_values(by=['AI_Score','마번'], ascending=[False, True]).head(4)
     top_n = top['마번'].tolist()
@@ -205,18 +221,25 @@ def calculate_kelly_allocation(df_analysis):
     return bok, box
 
 # ----------------------
-# UI
+# UI 및 상태 관리 (수정 완료: st.session_state 사용)
 # ----------------------
 
+# 세션 상태 초기화: DataFrame을 저장할 키 설정
+if 'df_parsed' not in st.session_state:
+    st.session_state['df_parsed'] = pd.DataFrame()
+if 'df_dtp' not in st.session_state:
+    st.session_state['df_dtp'] = pd.DataFrame()
+
 st.sidebar.header('입력 설정')
-use_sample = st.sidebar.checkbox('샘플 PDF 사용 (/mnt/data/j_run_hr_251121_01.pdf)', value=True)
-uploaded_file = st.sidebar.file_uploader('출전표 PDF 업로드 (선택)', type=['pdf'])
+use_sample = st.sidebar.checkbox('샘플 PDF 사용 (j_run_hr_251121_01.pdf를 스크립트 폴더에 두세요)', value=False)
+uploaded_file = st.sidebar.file_uploader('출전표 PDF 업로드', type=['pdf'])
 
 race_text = ""
-source = ''
+source = '업로드 필요'
+
 if use_sample and not uploaded_file:
-    sample_path = "/mnt/data/j_run_hr_251121_01.pdf"
-    race_text = extract_text_from_pdf(sample_path)
+    sample_path = "j_run_hr_251121_01.pdf" 
+    race_text = extract_text_from_pdf(sample_path) 
     source = sample_path
 elif uploaded_file is not None:
     race_text = extract_text_from_pdf(BytesIO(uploaded_file.read()))
@@ -225,41 +248,68 @@ elif uploaded_file is not None:
 st.markdown(f"**소스:** {source}")
 
 st.subheader('출전표 추출 텍스트 (편집 가능)')
-if race_text:
-    txt = st.text_area('추출 텍스트', value='\n'.join(race_text.splitlines()[:400]), height=240)
-else:
-    txt = st.text_area('추출 텍스트', value='', height=240)
+# 텍스트 에어리어의 내용을 세션 상태에 저장하여 버튼 클릭 시 접근 가능하게 함
+st.session_state.txt_input = st.text_area('추출 텍스트', 
+                                          value=race_text if race_text else '', 
+                                          height=240, 
+                                          key='current_text')
 
-if st.button('파싱 -> 표 생성'):
-    df = parse_race_pdf_text(txt)
+
+# '파싱 -> 표 생성' 버튼 처리 함수
+def handle_parsing():
+    # 텍스트 에어리어의 최신 내용으로 파싱 시도
+    df = parse_race_pdf_text(st.session_state.current_text)
     if df.empty:
-        st.warning('파싱 결과가 없습니다. 텍스트를 확인하거나 다른 PDF를 업로드 해주세요.')
+        st.warning('파싱 결과가 없습니다. 추출된 텍스트를 확인하거나 다른 PDF를 업로드 해주세요.')
+        st.session_state['df_parsed'] = pd.DataFrame()
     else:
         st.success(f'파싱 완료: {len(df)}마리')
-        st.dataframe(df, use_container_width=True)
+        st.session_state['df_parsed'] = df
 
-        edited = st.experimental_data_editor(df, num_rows='dynamic')
+st.button('파싱 -> 표 생성', on_click=handle_parsing)
 
-        track_condition = st.selectbox('주로 상태', ['양호','다소 습함','습함','불량','건조'])
-        if st.button('DTP 분석 및 포트폴리오 생성'):
-            df_dtp = apply_dtp_protocol(edited, track_condition)
-            bok, box = calculate_kelly_allocation(df_dtp)
-            st.header('DTP 결과')
-            st.dataframe(df_dtp, use_container_width=True)
 
-            st.header('추천 포트폴리오')
-            c1, c2 = st.columns(2)
-            with c1:
-                st.subheader('복승식')
-                for it in bok:
-                    st.markdown(f"**{it['name']}** — {it['percentage']}%")
-            with c2:
-                st.subheader('삼복승식')
-                for it in box:
-                    st.markdown(f"**{it['name']}** — {it['percentage']}%")
+# 파싱된 DataFrame이 세션 상태에 있을 경우에만 데이터 편집기 및 분석 버튼 표시
+if not st.session_state['df_parsed'].empty:
+    st.markdown("### 📊 파싱 결과 (편집 가능)")
+    # 편집된 결과를 'df_edited' 키에 저장하며, 자동으로 세션 상태 관리
+    edited_df = st.data_editor(st.session_state['df_parsed'], num_rows='dynamic', key='df_edited')
+    
+    st.markdown("---")
+    st.markdown("### 🐴 분석 설정")
+    track_condition = st.selectbox('주로 상태', ['양호','다소 습함','습함','불량','건조'], key='track_select')
+    
+    # DTP 분석 및 포트폴리오 생성 버튼
+    if st.button('DTP 분석 및 포트폴리오 생성'):
+        # 사용자가 편집한 edited_df를 분석 함수에 전달
+        df_dtp = apply_dtp_protocol(edited_df, track_condition)
+        
+        # 분석 결과를 세션 상태에 저장
+        st.session_state['df_dtp'] = df_dtp
+        
+        bok, box = calculate_kelly_allocation(df_dtp)
+        
+        st.header('DTP 결과')
+        st.dataframe(df_dtp, use_container_width=True)
 
-            if st.button('파싱 결과 CSV 다운로드'):
-                csv = edited.to_csv(index=False).encode('utf-8-sig')
-                st.download_button('CSV 다운로드', csv, file_name='parsed_horses.csv', mime='text/csv')
+        st.header('추천 포트폴리오')
+        c1, c2 = st.columns(2)
+        with c1:
+            st.subheader('복승식')
+            for it in bok:
+                st.markdown(f"**{it['name']}** — {it['percentage']}%")
+        with c2:
+            st.subheader('삼복승식')
+            for it in box:
+                st.markdown(f"**{it['name']}** — {it['percentage']}%")
+
+    # CSV 다운로드 버튼 (DTP 분석이 완료된 후에만 표시)
+    if not st.session_state['df_dtp'].empty:
+        st.markdown("---")
+        if st.button('최종 결과 CSV 다운로드'):
+            # 편집된 데이터와 DTP 분석 결과를 병합
+            final_df = edited_df.merge(st.session_state['df_dtp'], on=['마번', '마명'], how='left')
+            csv = final_df.to_csv(index=False).encode('utf-8-sig')
+            st.download_button('CSV 다운로드', csv, file_name='analyzed_horses.csv', mime='text/csv')
 
 st.caption('자동 파서는 PDF의 무게 토큰을 기준으로 앞뒤 텍스트를 분석합니다. 일부 항목은 수동 편집이 필요할 수 있습니다.')
