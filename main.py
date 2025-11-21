@@ -263,23 +263,43 @@ def calculate_kelly_allocation(df_analysis):
     # 리스크 점수가 낮을수록 AI_Score가 높음
     df_analysis['AI_Score'] = 100 - (df_analysis['DTP 리스크 점수'] * 10)
     
+    # 켈리 분배는 최소 2마리 이상일 때 의미가 있으므로, 최소한의 검증은 필요함.
+    # 상위 3마리 마번만 가져옵니다.
     top_3 = df_analysis.sort_values(by='AI_Score', ascending=False).head(3)['마번'].tolist()
 
-    if len(top_3) >= 2:
-        # A그룹 마필이 최소 2마리 이상일 경우에만 분배
+    복승_allocation = []
+    삼복승_allocation = []
+    
+    num_candidates = len(top_3)
+    
+    # --- 복승식 분배 ---
+    if num_candidates >= 3:
+        # 3마리 이상: 핵심(1-2), 방어(1-3), 부축(2-3)
         복승_allocation = [
             {'name': f"{top_3[0]} - {top_3[1]} 조합 (핵심)", 'percentage': 55.0},
             {'name': f"{top_3[0]} - {top_3[2]} 조합 (방어)", 'percentage': 30.0},
             {'name': f"{top_3[1]} - {top_3[2]} 조합 (부축)", 'percentage': 15.0}
         ]
+    elif num_candidates == 2:
+        # 2마리: 핵심(1-2)에 100% 집중 (이전 IndexError 방지)
+        복승_allocation = [
+            {'name': f"{top_3[0]} - {top_3[1]} 조합 (핵심)", 'percentage': 100.0}
+        ]
+    else:
+        # 0 또는 1마리
+        복승_allocation = [{'name': '분석 불가 (유력 후보 부족)', 'percentage': 100.0}]
+
+    # --- 삼복승식 분배 ---
+    if num_candidates >= 3:
+        # 3마리 이상: BOX(1-2-3) 및 방어
         삼복승_allocation = [
             {'name': f"BOX ({top_3[0]} - {top_3[1]} - {top_3[2]}) (핵심)", 'percentage': 70.0},
             {'name': f"{top_3[0]} - {top_3[1]} - 복병 (방어)", 'percentage': 30.0}
         ]
     else:
-        복승_allocation = [{'name': '분석 불가 (유력 후보 부족)', 'percentage': 100.0}]
+        # 2마리 이하
         삼복승_allocation = [{'name': '분석 불가 (유력 후보 부족)', 'percentage': 100.0}]
-
+        
     return 복승_allocation, 삼복승_allocation
 
 # --- 4. 메인 Streamlit 함수 ---
